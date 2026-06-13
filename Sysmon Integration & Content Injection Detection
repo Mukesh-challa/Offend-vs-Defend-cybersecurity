@@ -1,0 +1,275 @@
+# 🛡️ SOC Home Lab — Lab 1: Sysmon Integration & Content Injection Detection
+
+> **Series:** SOC Home Lab | **Difficulty:** Beginner–Intermediate | **Platform:** Windows 11 + Kali Linux + Splunk
+
+---
+
+## What You'll Build
+
+A fully instrumented Windows endpoint that ships telemetry to Splunk, with working detections for network reconnaissance and content injection attack chains. By the end, you'll have Sysmon talking to Splunk, Event ID 3 firing on every outbound connection, and a detection blueprint for MITRE ATT&CK T1659.
+
+---
+
+## Environment
+
+| Component | Details |
+|-----------|---------|
+| Victim Endpoint | Windows 11 |
+| Sysmon | v15.20 |
+| Log Forwarder | Splunk Universal Forwarder |
+| SIEM | Splunk Enterprise |
+| Attacker | Kali Linux |
+
+---
+
+## Lab Phases
+
+### Phase 1 — Verify Sysmon Is Actually Running
+
+Don't assume. Confirm.
+
+```powershell
+Get-Service *sysmon*
+Get-ChildItem -Path C:\ -Filter sysmon*.exe -Recurse
+```
+
+You should see `Sysmon.exe`, `Sysmon64.exe`, and `Sysmon64a.exe`. If the service is stopped, Splunk will never see a single event.
+
+---
+
+### Phase 2 — Audit Your Splunk Log Sources
+
+Open Splunk and verify the following sources are actively collecting:
+
+```
+WinEventLog:Security
+WinEventLog:System
+WinEventLog:Application
+WinEventLog:Microsoft-Windows-PowerShell/Operational
+pfirewall.log
+```
+
+**Common finding:** Everything above is flowing. Sysmon is not.
+
+---
+
+### Phase 3 — Diagnose Why Sysmon Events Are Missing
+
+Pull the Splunk Universal Forwarder's internal logs. Look for this:
+
+```
+Could not subscribe to Windows Event Log channel
+Microsoft-Windows-Sysmon/Operational
+errorCode=5
+```
+
+`errorCode=5` = **Access Denied.**
+
+The forwarder runs as `NT SERVICE\SplunkForwarder` by default. That account has no rights to read the Sysmon channel.
+
+---
+
+### Phase 4 — Fix the Permissions
+
+Inspect the current ACL on the Sysmon channel:
+
+```powershell
+wevtutil gl Microsoft-Windows-Sysmon/Operational
+```
+
+Grant the forwarder account read access, then restart the forwarder service. Sysmon events will start flowing immediately.
+
+> 💡 **Lesson:** A service running and a service being readable are two different things. Always verify access, not just installation.
+
+---
+
+### Phase 5 — Enable Network Telemetry (Event ID 3)
+
+Most Sysmon deployments ship with network monitoring disabled. Verify yours:
+
+```powershell
+Sysmon64.exe -c
+```
+
+If you see `Network connection: disabled`, you're flying blind on outbound activity.
+
+Fix it with the SwiftOnSecurity config — the community standard for Sysmon tuning:
+
+```powershell
+# Download from: https://github.com/SwiftOnSecurity/sysmon-config
+Sysmon64.exe -c sysmonconfig-export.xml
+```
+
+Confirm it took:
+
+```
+Network connection: enabled
+```
+
+---
+
+### Phase 6 — Validate Event ID 3 Is Firing
+
+Generate some traffic:
+
+```powershell
+nslookup google.com
+```
+
+Then browse normally. Check Splunk. You should see:
+
+```
+EventCode: 3 | Image: nslookup.exe     | DestinationPort: 53
+EventCode: 3 | Image: OneDrive.exe     | DestinationPort: 443
+```
+
+If those appear, your network telemetry pipeline is working end-to-end.
+
+---
+
+### Phase 7 — Understanding Sysmon's Blind Spot
+
+From your Kali box:
+
+```bash
+nmap -sV <windows_ip>
+```
+
+Sysmon on Windows will **not** log `nmap.exe`. Why? Because `nmap` runs on the attacker's machine. Sysmon only sees what runs on the host it's installed on.
+
+**What actually captures this:**
+
+| Data Source | What It Sees |
+|-------------|-------------|
+| Sysmon Event ID 3 | Inbound connection landing on a Windows process |
+| Windows Firewall Log | The attacker's IP hitting your ports |
+| Splunk Correlation | Ties them together into a detection |
+
+---
+
+### Phase 8 — Reconnaissance Detection Blueprint
+
+#### Data Sources for Port Scan Detection
+
+**Windows Firewall Logs**
+- Rapid connections to multiple ports from a single source IP
+- High-frequency ALLOW/DROP entries per source
+
+**Sysmon Event ID 3**
+- Unusual processes accepting connections
+- Unexpected destination/source port combinations
+
+**Sysmon Event ID 1**
+- Unexpected process spawns correlating with inbound traffic
+
+---
+
+### Phase 9 — Content Injection Detection Chain
+
+**MITRE ATT&CK:** [T1659 - Content Injection](https://attack.mitre.org/techniques/T1659/)
+
+The attack chain you're detecting:
+
+```
+User visits a compromised or attacker-controlled site
+          ↓
+File is downloaded (drive-by or user-initiated)
+          ↓
+[Sysmon Event ID 11] — File created on disk
+          ↓
+User opens the file
+          ↓
+[Sysmon Event ID 1] — New process spawned
+          ↓
+Process phones home
+          ↓
+[Sysmon Event ID 3] — Outbound network connection
+```
+
+You're not detecting a signature. You're detecting **behavior**.
+
+---
+
+### Phase 10 — Safe Simulation
+
+Run this on your Kali box to simulate a malicious host:
+
+```bash
+python3 -m http.server 8080
+```
+
+On Windows:
+1. Browse to `http://<kali_ip>:8080`
+2. Download any file from the server
+3. Open it
+
+You should see all three events fire in Splunk:
+
+| Event ID | What Triggered It |
+|----------|------------------|
+| 11 | File landed on disk |
+| 1 | File was opened / executed |
+| 3 | Process made a network call |
+
+---
+
+## Splunk Queries to Build
+
+```spl
+# Detect file creation from browser processes
+index=main source="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"
+EventCode=11
+| where match(Image, "(?i)(chrome|firefox|msedge|iexplore)")
+
+# Detect process spawned from downloaded file location
+index=main source="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"
+EventCode=1
+| where match(CurrentDirectory, "(?i)(downloads|temp|appdata)")
+
+# Detect network call from suspicious child process
+index=main source="XmlWinEventLog:Microsoft-Windows-Sysmon/Operational"
+EventCode=3
+| where match(ParentImage, "(?i)(winword|excel|acrobat|chrome)")
+```
+
+---
+
+## MITRE ATT&CK Coverage
+
+| Technique | ID | Detection Source |
+|-----------|----|-----------------|
+| Content Injection | T1659 | Sysmon EID 11 + 1 + 3 |
+| User Execution | T1204 | Sysmon EID 1 |
+| Command & Scripting Interpreter | T1059 | PowerShell Operational Log |
+| PowerShell | T1059.001 | Event ID 4104 |
+| Signed Binary Proxy Execution | T1218 | Sysmon EID 1 (LOLBins) |
+
+---
+
+## Key Takeaways
+
+- **Sysmon running ≠ Sysmon readable.** Always check forwarder permissions.
+- **Event ID 3 is off by default.** Use SwiftOnSecurity config to fix this.
+- **Sysmon doesn't see the attacker's machine.** Correlate with firewall logs.
+- **Detections are behavioral chains.** Single events are noise. Sequences are signals.
+
+---
+
+## What's Next — Lab 2
+
+[➡️ Lab 2: PowerShell Payload Delivery & Detection Engineering](./Lab2_PowerShell_Payload_Detection.md)
+
+Simulate a real PowerShell download-and-execute attack from Kali, generate full telemetry, and build Splunk detections that reconstruct the entire kill chain.
+
+---
+
+## Resources
+
+- [SwiftOnSecurity Sysmon Config](https://github.com/SwiftOnSecurity/sysmon-config)
+- [Sysmon Sysinternals Docs](https://learn.microsoft.com/en-us/sysinternals/downloads/sysmon)
+- [MITRE ATT&CK T1659](https://attack.mitre.org/techniques/T1659/)
+- [Splunk Security Essentials](https://splunkbase.splunk.com/app/3435)
+
+---
+
+*Part of the SOC Home Lab series. Built hands-on, documented for the community.*
