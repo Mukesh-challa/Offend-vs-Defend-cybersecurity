@@ -1026,4 +1026,520 @@ Base64 encoding is not inherently malicious. Effective detection relies on conte
 
 
 
-This lab successfully demonstrated the detection of Base64-encoded PowerShell execution using Sysmon and Splunk. Sysmon Event ID 1 provided detailed process creation telemetry, allowing detection of PowerShell launched with the `-EncodedCommand` parameter. The resulting detection rule offers an effective method for identifying obfuscated PowerShell activity commonly associated with adversary behavior while providing a foundation for advanced PowerShell threat hunting and detection engineering.
+This lab successfully demonstrated the detection of Base64-encoded PowerShell execution using Sysmon and Splunk. Sysmon Event ID 1 provided detailed process creation telemetry, allowing detection of PowerShell launched with the `-EncodedCommand` parameter. The resulting detection rule offers an effective method for 
+
+# Alert Validation and Incident Response Playbook
+
+## PowerShell Base64 Encoded Command Execution
+
+### Objective
+
+This playbook provides a structured methodology for validating and responding to alerts involving PowerShell Base64-encoded command execution. The purpose is to determine whether the activity is legitimate administrative usage or malicious execution requiring containment and escalation.
+
+---
+
+# Alert Trigger
+
+### Detection Logic
+
+Alert generated when:
+
+```text
+powershell.exe -enc
+powershell.exe -encodedcommand
+powershell.exe -e
+```
+
+is observed in:
+
+* Sysmon Event ID 1
+* Windows Security Event ID 4688
+* EDR telemetry
+* SIEM detection rules
+
+---
+
+# Phase 1: Alert Validation
+
+## Step 1: Verify Alert Accuracy
+
+Review the alert details:
+
+| Field          | Validation                       |
+| -------------- | -------------------------------- |
+| Timestamp      | When execution occurred          |
+| Hostname       | Affected endpoint                |
+| User           | Account executing command        |
+| Process        | powershell.exe                   |
+| Parent Process | Process that launched PowerShell |
+| Command Line   | Encoded command present          |
+
+### Expected Output
+
+```text
+Image: powershell.exe
+CommandLine: powershell.exe -enc SQBFAFgA...
+ParentImage: cmd.exe
+```
+
+If no encoded content exists, classify as detection error and close accordingly.
+
+---
+
+## Step 2: Extract Encoded Payload
+
+Copy the Base64 string from the command line.
+
+Example:
+
+```text
+SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQA...
+```
+
+Decode the string using:
+
+```powershell
+[Text.Encoding]::Unicode.GetString(
+[Convert]::FromBase64String("<Base64_String>")
+)
+```
+
+Document decoded output.
+
+---
+
+## Step 3: Determine Intent
+
+Classify the decoded command.
+
+### Administrative Activity
+
+Examples:
+
+```powershell
+Get-Service
+Get-Process
+Get-ADUser
+Restart-Service
+```
+
+Potentially legitimate.
+
+---
+
+### Suspicious Activity
+
+Examples:
+
+```powershell
+Invoke-WebRequest
+Start-BitsTransfer
+DownloadString
+IEX
+```
+
+Requires deeper investigation.
+
+---
+
+### Malicious Activity
+
+Examples:
+
+```powershell
+Invoke-Mimikatz
+Reverse Shell
+Empire Launcher
+Cobalt Strike Stager
+Credential Dumping Commands
+```
+
+Immediate escalation required.
+
+---
+
+# Phase 2: Context Validation
+
+## User Context
+
+Determine:
+
+* Is the user an administrator?
+* Is PowerShell usage normal for this user?
+* Was activity performed during business hours?
+* Is there an approved change request?
+
+### Findings
+
+#### Expected
+
+```text
+Server Administrator
+IT Operations Engineer
+SOC Engineer
+```
+
+#### Suspicious
+
+```text
+Finance User
+HR User
+Guest Account
+```
+
+---
+
+## Parent Process Validation
+
+Identify the process that launched PowerShell.
+
+### Normal Parents
+
+```text
+cmd.exe
+explorer.exe
+powershell_ise.exe
+```
+
+### Suspicious Parents
+
+```text
+winword.exe
+excel.exe
+outlook.exe
+mshta.exe
+wscript.exe
+rundll32.exe
+```
+
+Suspicious parents may indicate phishing, malware, or script-based execution.
+
+---
+
+## Host Context Validation
+
+Determine:
+
+* Workstation or server?
+* Critical asset?
+* Recent security alerts?
+* Known administrative activity?
+
+High-value assets require higher scrutiny.
+
+---
+
+# Phase 3: Scope Assessment
+
+Determine whether activity is isolated or widespread.
+
+Investigate:
+
+### Same User
+
+Search for:
+
+```text
+Additional PowerShell executions
+Authentication activity
+Lateral movement indicators
+```
+
+### Same Host
+
+Search for:
+
+```text
+Network connections
+Persistence creation
+Scheduled tasks
+Registry modifications
+```
+
+### Environment Wide
+
+Search for:
+
+```text
+Same Base64 payload
+Same command line
+Same hash
+Same parent process
+```
+
+---
+
+# Phase 4: Threat Assessment
+
+Assign severity based on findings.
+
+## Low Severity
+
+Criteria:
+
+```text
+Known administrator
+Approved maintenance
+Legitimate script
+No suspicious activity
+```
+
+Action:
+
+```text
+Document findings
+Close as benign
+```
+
+---
+
+## Medium Severity
+
+Criteria:
+
+```text
+Unknown encoded command
+No obvious malicious indicators
+Requires additional investigation
+```
+
+Action:
+
+```text
+Escalate to Tier 2
+Continue monitoring
+```
+
+---
+
+## High Severity
+
+Criteria:
+
+```text
+Credential dumping
+Payload download
+Remote execution
+Command-and-control activity
+```
+
+Action:
+
+```text
+Immediate containment
+Incident declaration
+```
+
+---
+
+# Phase 5: Containment
+
+If malicious activity is confirmed:
+
+## Endpoint Isolation
+
+Contain affected system through:
+
+* EDR isolation
+* Network quarantine
+* VLAN isolation
+
+Goal:
+
+```text
+Prevent lateral movement
+Prevent command-and-control communication
+```
+
+---
+
+## Account Containment
+
+If credentials may be compromised:
+
+```text
+Disable account
+Force password reset
+Terminate active sessions
+```
+
+---
+
+# Phase 6: Investigation
+
+Collect evidence.
+
+## Process Investigation
+
+Review:
+
+```text
+Sysmon Event ID 1
+Process lineage
+Child processes
+```
+
+Determine:
+
+```text
+What launched PowerShell?
+What did PowerShell launch?
+```
+
+---
+
+## Network Investigation
+
+Review:
+
+```text
+Sysmon Event ID 3
+Firewall logs
+Proxy logs
+DNS logs
+```
+
+Identify:
+
+```text
+External IPs
+Suspicious domains
+Data transfers
+```
+
+---
+
+## PowerShell Logging
+
+Review:
+
+```text
+PowerShell Event ID 4103
+PowerShell Event ID 4104
+```
+
+Confirm actual script execution.
+
+---
+
+## Persistence Investigation
+
+Look for:
+
+```text
+Scheduled Tasks
+Services
+Registry Run Keys
+Startup Folder Entries
+WMI Persistence
+```
+
+---
+
+# Phase 7: Eradication
+
+Remove identified threats.
+
+Actions:
+
+```text
+Delete malicious files
+Remove scheduled tasks
+Remove persistence mechanisms
+Terminate malicious processes
+Block indicators
+```
+
+Validate removal through rescanning.
+
+---
+
+# Phase 8: Recovery
+
+Restore affected systems.
+
+Actions:
+
+```text
+Reconnect endpoint
+Re-enable account
+Validate business functionality
+Increase monitoring
+```
+
+Monitor for recurrence.
+
+---
+
+# Phase 9: Lessons Learned
+
+Document:
+
+### Root Cause
+
+```text
+Phishing
+Malware
+Administrative Misuse
+Unauthorized Script Execution
+```
+
+### Indicators Observed
+
+```text
+Encoded PowerShell
+Network Connections
+Downloaded Payloads
+Persistence Mechanisms
+```
+
+### Detection Improvements
+
+```text
+New SIEM Rules
+Additional IOC Coverage
+Improved Baselining
+Enhanced Logging
+```
+
+---
+
+# Analyst Decision Matrix
+
+| Question                     | Yes                 | No                       |
+| ---------------------------- | ------------------- | ------------------------ |
+| Base64 decoded successfully? | Continue            | Investigate detection    |
+| Command legitimate?          | Close               | Continue                 |
+| Suspicious parent process?   | Escalate            | Continue                 |
+| Network activity observed?   | Escalate            | Continue                 |
+| Credential theft indicators? | High Severity       | Continue                 |
+| Persistence found?           | Incident            | Continue                 |
+| Malicious intent confirmed?  | Contain and Respond | Close with justification |
+
+---
+
+# Final Analyst Outcome
+
+### Benign
+
+```text
+Known administrative activity
+Document and close
+```
+
+### Suspicious
+
+```text
+Escalate for deeper investigation
+```
+
+### Malicious
+
+```text
+Contain
+Investigate
+Eradicate
+Recover
+Document Incident
+```
+identifying obfuscated PowerShell activity commonly associated with adversary behavior while providing a foundation for advanced PowerShell threat hunting and detection engineering.
